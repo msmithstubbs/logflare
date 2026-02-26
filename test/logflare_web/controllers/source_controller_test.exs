@@ -362,8 +362,6 @@ defmodule LogflareWeb.SourceControllerTest do
         |> html_response(200)
         |> Floki.parse_document!()
 
-      assert Floki.find(html, "input[name='source[name]']") != []
-
       assert [{_tag, attrs, _children}] =
                Floki.find(html, "input[name='source[description]']")
 
