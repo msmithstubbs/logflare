@@ -254,11 +254,12 @@ defmodule LogflareWeb.Router do
         live "/:id", EndpointsLive, :show
         live "/:id/edit", EndpointsLive, :edit
       end
+
+      live("/query", QueryLive, :index)
     end
 
     live_session :without_team_param, on_mount: @common_on_mount_hooks ++ @auth_live_hooks do
       live("/access-tokens", AccessTokensLive, :index)
-      live("/query", QueryLive, :index)
       live("/key-values", KeyValuesLive, :index)
 
       scope "/integrations" do
