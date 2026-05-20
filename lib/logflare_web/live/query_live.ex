@@ -8,6 +8,7 @@ defmodule LogflareWeb.QueryLive do
   alias Logflare.Backends
   alias Logflare.Endpoints
   alias Logflare.Repo
+  alias Logflare.Sources
   alias Logflare.Teams.TeamContext
   alias LogflareWeb.AuthLive
   alias LogflareWeb.QueryComponents
@@ -37,49 +38,15 @@ defmodule LogflareWeb.QueryLive do
       </p>
     </section>
     <section class="mx-auto container pt-3 tw-flex tw-flex-col tw-gap-4">
-      <.form for={%{}} phx-submit="run-query" class="tw-min-h-[80px] tw-flex tw-flex-col tw-gap-4">
-        <LiveMonacoEditor.code_editor
-          value={@query_string}
-          change="parse-query"
-          path="query"
-          id="query"
-          opts={
-            Map.merge(
-              LiveMonacoEditor.default_opts(),
-              %{
-                "wordWrap" => "on",
-                "language" => "sql",
-                "fontSize" => 12,
-                "padding" => %{
-                  "top" => 14,
-                  "bottom" => 14
-                },
-                "contextmenu" => false,
-                "hideCursorInOverviewRuler" => true,
-                "smoothScrolling" => true,
-                "scrollbar" => %{
-                  "vertical" => "auto",
-                  "horizontal" => "hidden",
-                  "verticalScrollbarSize" => 6,
-                  "alwaysConsumeMouseWheel" => false
-                },
-                "lineNumbers" => "off",
-                "glyphMargin" => false,
-                "lineNumbersMinChars" => 0,
-                "folding" => false,
-                "roundedSelection" => true,
-                "minimap" => %{
-                  "enabled" => false
-                }
-              }
-            )
-          }
-        />
+      <.form :let={f} for={query_form(@query_string)} phx-change="parse-query" phx-submit="run-query" class="tw-min-h-[80px] tw-flex tw-flex-col tw-gap-4">
+        <LogflareWeb.MonacoEditorComponentNew.code_editor id="monaco-hook" field={f[:value]} completions={@completions} />
         <div class="tw-ml-auto">
-          <button type="button" class="btn btn-secondary" phx-click="format-query">
+          <button type="submit" name="action" value="format" class="btn btn-secondary">
             Format
           </button>
-          {submit("Run query", class: "btn btn-secondary")}
+          <button type="submit" name="action" value="run" class="btn btn-secondary">
+            Run query
+          </button>
         </div>
       </.form>
 
@@ -153,22 +120,19 @@ defmodule LogflareWeb.QueryLive do
   end
 
   def mount(%{}, _session, socket) do
-    %{assigns: %{user: user}} = socket
-
-    endpoints = Endpoints.list_endpoints_by(user_id: user.id)
-    alerts = Alerting.list_alert_queries_by_user_id(user.id)
-
     socket =
       socket
-      |> assign(:user_id, user.id)
       |> assign(:query_result_rows, nil)
       |> assign(:total_bytes_processed, nil)
       |> assign(:parse_error_message, nil)
       |> assign(:query_string, nil)
-      |> assign(:endpoints, endpoints)
-      |> assign(:alerts, alerts)
 
     {:ok, socket}
+  end
+
+  defp query_form(query_string) do
+    %{"value" => query_string}
+    |> to_form()
   end
 
   def handle_params(params, _uri, socket) do
@@ -182,21 +146,21 @@ defmodule LogflareWeb.QueryLive do
           formatted
       end
 
-    %{assigns: %{user: user}} = socket
-    endpoints = Endpoints.list_endpoints_by(user_id: user.id)
-    alerts = Alerting.list_alert_queries_by_user_id(user.id)
-
     socket =
       socket
-      |> assign(:user_id, user.id)
-      |> assign(:endpoints, endpoints)
-      |> assign(:alerts, alerts)
+      |> maybe_assign_team_context(params, q)
+      |> assign_query_resources()
 
     query_string =
-      if q != nil and socket.assigns.query_string == nil do
-        q
-      else
-        "SELECT id, timestamp, metadata, event_message \nFROM `YourSource` \nWHERE timestamp > '#{DateTime.utc_now() |> DateTime.to_iso8601()}'"
+      cond do
+        q != nil ->
+          q
+
+        socket.assigns.query_string != nil ->
+          socket.assigns.query_string
+
+        true ->
+          "SELECT id, timestamp, metadata, event_message \nFROM `YourSource` \nWHERE timestamp > '#{DateTime.utc_now() |> DateTime.to_iso8601()}'"
       end
 
     if query_string != nil do
@@ -206,9 +170,27 @@ defmodule LogflareWeb.QueryLive do
     {:noreply, assign(socket, :query_string, query_string)}
   end
 
+  defp assign_query_resources(socket) do
+    %{assigns: %{user: user}} = socket
+
+    socket
+    |> assign(:user_id, user.id)
+    |> assign(:endpoints, Endpoints.list_endpoints_by(user_id: user.id))
+    |> assign(:alerts, Alerting.list_alert_queries_by_user_id(user.id))
+    |> assign_completions()
+  end
+
   defp assign_team_context_for_query(socket, nil), do: socket
 
   defp assign_team_context_for_query(socket, query_string) do
+    maybe_assign_team_context(socket, %{}, query_string)
+  end
+
+  defp maybe_assign_team_context(socket, %{"t" => _team_id}, _query), do: socket
+
+  defp maybe_assign_team_context(socket, _params, nil), do: socket
+
+  defp maybe_assign_team_context(socket, _params, query_string) do
     effective_user = socket.assigns[:team_user] || socket.assigns.user
 
     case TeamContext.resource_team_id_query(__MODULE__, %{"q" => query_string}, effective_user) do
@@ -249,9 +231,26 @@ defmodule LogflareWeb.QueryLive do
 
   def handle_event(
         "run-query",
-        _params,
-        %{assigns: %{query_string: query_string}} = socket
+        %{"action" => "format", "value" => query_string},
+        socket
       ) do
+    {:ok, formatted} = SqlFmt.format_query(query_string)
+
+    {:noreply, assign(socket, :query_string, formatted)}
+  end
+
+  def handle_event(
+        "run-query",
+        params,
+        socket
+      ) do
+    query_string =
+      if Map.has_key?(params, "action") do
+        Map.get(params, "value", socket.assigns.query_string)
+      else
+        socket.assigns.query_string
+      end
+
     socket = assign_team_context_for_query(socket, query_string)
     %{assigns: %{user: user}} = socket
 
@@ -278,16 +277,6 @@ defmodule LogflareWeb.QueryLive do
     handle_info(:parse_query, socket)
   end
 
-  def handle_event("parse-query", %{"_target" => ["live_monaco_editor", _]}, socket) do
-    # ignore change events from the editor field
-    {:noreply, socket}
-  end
-
-  def handle_event("format-query", _params, socket) do
-    {:ok, formatted} = SqlFmt.format_query(socket.assigns.query_string)
-    {:noreply, LiveMonacoEditor.set_value(socket, formatted, to: "query")}
-  end
-
   defp run_query(socket, user, query_string) do
     type =
       case Backends.get_default_backend(user) do
@@ -311,5 +300,17 @@ defmodule LogflareWeb.QueryLive do
         socket
         |> put_flash(:error, "Error occurred when running query: #{inspect(err)}")
     end
+  end
+
+  defp assign_completions(socket) do
+    %{endpoints: endpoints, alerts: alerts, user_id: user_id} = socket.assigns
+    sources = Sources.list_sources_by_user(user_id)
+
+    completions =
+      [sources, endpoints, alerts]
+      |> List.flatten()
+      |> Enum.map(& &1.name)
+
+    assign(socket, completions: completions)
   end
 end
