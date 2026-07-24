@@ -152,8 +152,21 @@ defmodule Logflare.Backends.Adaptor.PostgresAdaptor do
   @spec test_connection(Backend.t()) :: :ok | {:error, term()}
   def test_connection(%Backend{} = backend) do
     case execute_query(backend, "SELECT 1 AS result", []) do
-      {:ok, %QueryResult{rows: [%{"result" => 1}]}} -> :ok
-      {:error, _} = error -> error
+      {:ok, %QueryResult{rows: [%{"result" => 1}]}} ->
+        :ok
+
+      {:error, %QueryError{kind: kind}}
+      when kind in [:connection_error, :backend_error] ->
+        {:error, kind}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Unexpected error when testing Postgres backend connection: #{inspect(reason)}",
+          backend_id: backend.id,
+          user_id: backend.user_id
+        )
+
+        {:error, :unknown_error}
     end
   end
 
@@ -216,10 +229,20 @@ defmodule Logflare.Backends.Adaptor.PostgresAdaptor do
 
   @impl Logflare.Backends.Adaptor
   def redact_config(config) do
-    url = Map.get(config, :url) || Map.get(config, "url")
-    updated = String.replace(url, ~r/(.+):.+\@/, "\\g{1}:REDACTED@")
-    Map.put(config, :url, updated)
+    config
+    |> redact_url()
+    |> Map.replace(:password, "REDACTED")
+    |> Map.replace("password", "REDACTED")
   end
+
+  defp redact_url(config) do
+    config
+    |> Map.replace_lazy(:url, &redact_url_string/1)
+    |> Map.replace_lazy("url", &redact_url_string/1)
+  end
+
+  defp redact_url_string(nil), do: nil
+  defp redact_url_string(url), do: String.replace(url, ~r/(.+):.+\@/, "\\g{1}:REDACTED@")
 
   @spec to_query_error(
           :cannot_connect

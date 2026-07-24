@@ -317,8 +317,18 @@ cond do
            )
 
   config_env() != :test ->
-    if File.exists?("gcloud.json") do
-      config :goth, json: File.read!("gcloud.json")
+    google_credentials =
+      case System.get_env("GOOGLE_APPLICATION_CREDENTIALS_JSON") do
+        json when is_binary(json) and json != "" ->
+          json
+
+        _ ->
+          credentials_path = System.get_env("GOOGLE_APPLICATION_CREDENTIALS", "gcloud.json")
+          if File.exists?(credentials_path), do: File.read!(credentials_path)
+      end
+
+    if google_credentials do
+      config :goth, json: google_credentials
     end
 
   config_env() == :test ->
@@ -328,27 +338,34 @@ cond do
     raise "Missing Google or Backend credentials"
 end
 
+tls_cert_path = System.get_env("LOGFLARE_TLS_CERT_PATH", "cert.pem")
+tls_key_path = System.get_env("LOGFLARE_TLS_KEY_PATH", "cert.key")
+
 if(
   Env.get_boolean("LOGFLARE_ENABLE_GRPC_SSL") &&
-    File.exists?("cert.pem") && File.exists?("cert.key")
+    File.exists?(tls_cert_path) && File.exists?(tls_key_path)
 ) do
   config :logflare,
     ssl: [
-      certfile: "cert.pem",
-      keyfile: "cert.key"
+      certfile: tls_cert_path,
+      keyfile: tls_key_path
     ]
 end
 
+db_ssl_ca_cert_path = System.get_env("DB_SSL_CA_CERT_PATH", "db-server-ca.pem")
+db_ssl_client_cert_path = System.get_env("DB_SSL_CLIENT_CERT_PATH", "db-client-cert.pem")
+db_ssl_client_key_path = System.get_env("DB_SSL_CLIENT_KEY_PATH", "db-client-key.pem")
+
 if(
-  Env.get_boolean("DB_SSL") && File.exists?("db-server-ca.pem") &&
-    File.exists?("db-client-cert.pem") && File.exists?("db-client-key.pem")
+  Env.get_boolean("DB_SSL") && File.exists?(db_ssl_ca_cert_path) &&
+    File.exists?(db_ssl_client_cert_path) && File.exists?(db_ssl_client_key_path)
 ) do
   base_db_ssl_opts = [
     # ssl opts follow recs here: https://erlef.github.io/security-wg/secure_coding_and_deployment_hardening/ssl
     verify: :verify_peer,
-    cacertfile: Path.absname("db-server-ca.pem"),
-    certfile: Path.absname("db-client-cert.pem"),
-    keyfile: Path.absname("db-client-key.pem"),
+    cacertfile: Path.absname(db_ssl_ca_cert_path),
+    certfile: Path.absname(db_ssl_client_cert_path),
+    keyfile: Path.absname(db_ssl_client_key_path),
     depth: 3,
     versions: [:"tlsv1.2", :"tlsv1.3"],
     customize_hostname_check: [
@@ -530,3 +547,40 @@ read_replicas =
   |> Enum.uniq()
 
 config :logflare, :read_replicas, read_replicas
+
+spool_mode_override =
+  case System.get_env("SPOOL_MODE") do
+    p when p in [nil, ""] ->
+      []
+
+    mode when mode in ["producer", "consumer", "both"] ->
+      [mode: String.to_atom(mode)]
+
+    other ->
+      raise ArgumentError, "Invalid SPOOL_MODE=#{other}. Must be producer, consumer, or both."
+  end
+
+spool_provider_override =
+  case System.get_env("SPOOL_PROVIDER") do
+    p when p in [nil, ""] ->
+      []
+
+    provider when provider in ["aws", "gcp"] ->
+      [provider: String.to_atom(provider)]
+
+    other ->
+      raise ArgumentError, "Invalid SPOOL_PROVIDER=#{other}. Must be aws or gcp."
+  end
+
+spool_overrides =
+  spool_mode_override ++
+    spool_provider_override ++
+    if((q = System.get_env("SPOOL_QUEUE_NAME")) && q != "", do: [queue_name: q], else: []) ++
+    if((t = System.get_env("SPOOL_PUBSUB_TOPIC")) && t != "", do: [pubsub_topic: t], else: []) ++
+    if (b = System.get_env("SPOOL_BUCKET")) && b != "", do: [bucket: b], else: []
+
+if spool_overrides != [] do
+  config :logflare,
+         :spool,
+         Keyword.merge(Application.get_env(:logflare, :spool, []), spool_overrides)
+end

@@ -49,6 +49,52 @@ defmodule Logflare.Backends.Adaptor.PostgresAdaptorTest do
       config = %{url: "postgresql://localhost:5432/dbname"}
       assert ^config = PostgresAdaptor.redact_config(config)
     end
+
+    test "redacts standalone password field when configured via individual fields" do
+      config = %{hostname: "localhost", username: "user", password: "secret123", database: "db"}
+
+      assert %{password: "REDACTED"} = PostgresAdaptor.redact_config(config)
+    end
+
+    test "does not crash when config has no url" do
+      config = %{hostname: "localhost", username: "user", password: "secret123"}
+
+      assert %{hostname: "localhost"} = PostgresAdaptor.redact_config(config)
+    end
+
+    test "redacts both url-embedded and standalone passwords when both are present" do
+      config = %{
+        url: "postgresql://user:secret123@localhost:5432/dbname",
+        password: "secret123"
+      }
+
+      assert %{
+               url: "postgresql://user:REDACTED@localhost:5432/dbname",
+               password: "REDACTED"
+             } = PostgresAdaptor.redact_config(config)
+    end
+
+    test "redacts a string-keyed url in place, without leaving the atom key unredacted" do
+      config = %{"url" => "postgresql://user:secret123@localhost:5432/dbname"}
+
+      assert %{"url" => "postgresql://user:REDACTED@localhost:5432/dbname"} =
+               redacted =
+               PostgresAdaptor.redact_config(config)
+
+      refute Map.has_key?(redacted, :url)
+    end
+
+    test "redacts both key variants if a config has both :url and \"url\"" do
+      config = %{
+        "url" => "postgresql://user:othersecret@localhost:5432/otherdb",
+        url: "postgresql://user:secret123@localhost:5432/dbname"
+      }
+
+      assert %{
+               "url" => "postgresql://user:REDACTED@localhost:5432/otherdb",
+               url: "postgresql://user:REDACTED@localhost:5432/dbname"
+             } = PostgresAdaptor.redact_config(config)
+    end
   end
 
   describe "with postgres repo" do
@@ -231,13 +277,7 @@ defmodule Logflare.Backends.Adaptor.PostgresAdaptorTest do
         {:error, :cannot_connect}
       end)
 
-      assert {:error,
-              %QueryError{
-                kind: :connection_error,
-                backend: Logflare.Backends.Adaptor.PostgresAdaptor,
-                raw_error: :cannot_connect,
-                description: nil
-              }} = PostgresAdaptor.test_connection(backend)
+      assert {:error, :connection_error} = PostgresAdaptor.test_connection(backend)
     end
 
     test "execute_query/3 returns error tuple on invalid query", %{backend: backend} do

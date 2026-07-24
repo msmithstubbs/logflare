@@ -35,7 +35,6 @@ defmodule Logflare.LogEvent do
     field :event_type, Ecto.Enum, values: [:log, :metric, :trace], default: :log
     field :source_id, :integer, default: nil
     field :day_bucket, :integer
-    field :ingest_freshness, Ecto.Enum, values: [:fresh, :stale]
     # Indicates if the event was removed from ets during ingest
     field :is_popped, :boolean, virtual: true, default: false
 
@@ -44,6 +43,70 @@ defmodule Logflare.LogEvent do
       field :type, :string
       field :message, :string
     end
+  end
+
+  @doc """
+  Reconstructs a LogEvent from a record stored in the spool by the producer pipeline.
+  Skips the full make/transform/validate pipeline — the body is already in
+  BQ column spec format and the event was already validated on ingest.
+
+  Handles both NDJSON (string keys, ISO8601 ingested_at) and ETF (atom keys,
+  native DateTime) formats written by the producer.
+  """
+  @spec make_from_spool(map(), Source.t()) :: t()
+  def make_from_spool(
+        %{
+          id: id,
+          body: body,
+          event_type: event_type,
+          ingested_at: ingested_at_us
+        } = record,
+        source
+      )
+      when is_integer(ingested_at_us) do
+    ingested_at_dt = DateTime.from_unix!(ingested_at_us, :microsecond)
+    day_bucket = body["timestamp"] && DayBucket.from_microseconds(body["timestamp"])
+
+    %__MODULE__{
+      id: id,
+      source_id: source.id,
+      source_uuid: source.token,
+      source_name: source.name,
+      body: body,
+      event_type: event_type,
+      ingested_at: ingested_at_dt,
+      valid: true,
+      drop: false,
+      day_bucket: day_bucket,
+      via_rule_id: Map.get(record, :via_rule_id)
+    }
+  end
+
+  def make_from_spool(
+        %{
+          "id" => id,
+          "body" => body,
+          "event_type" => event_type,
+          "ingested_at" => ingested_at
+        } = record,
+        source
+      ) do
+    {:ok, ingested_at_dt, _} = DateTime.from_iso8601(ingested_at)
+    day_bucket = body["timestamp"] && DayBucket.from_microseconds(body["timestamp"])
+
+    %__MODULE__{
+      id: id,
+      source_id: source.id,
+      source_uuid: source.token,
+      source_name: source.name,
+      body: body,
+      event_type: String.to_existing_atom(event_type),
+      ingested_at: ingested_at_dt,
+      valid: true,
+      drop: false,
+      day_bucket: day_bucket,
+      via_rule_id: Map.get(record, "via_rule_id")
+    }
   end
 
   @doc """
@@ -86,7 +149,6 @@ defmodule Logflare.LogEvent do
 
     body = changeset.changes.body
     day_bucket = DayBucket.from_microseconds(body["timestamp"])
-    ingest_freshness = DayBucket.classify_freshness(day_bucket)
 
     le_map =
       Map.merge(changeset.changes, %{
@@ -99,8 +161,7 @@ defmodule Logflare.LogEvent do
         id: body["id"],
         event_type: event_type,
         timestamp_inferred: mapped["timestamp_inferred"],
-        day_bucket: day_bucket,
-        ingest_freshness: ingest_freshness
+        day_bucket: day_bucket
       })
 
     Logflare.LogEvent
